@@ -10,12 +10,13 @@ package main
 
 import (
 	"bufio"
-	"flag"
 	"fmt"
 	"github.com/h2non/filetype"
+	"github.com/spf13/pflag"
 	"log"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sync"
@@ -34,10 +35,11 @@ var availableThreads int
 var wg sync.WaitGroup
 
 var (
-	help          = flag.Bool("h", false, "Show this help")
-	with_filename = flag.Bool("H", false, "Print the file name for each match")
-	insensitive   = flag.Bool("i", false, "Case-insensitive")
-	recurse       = flag.Bool("r", false, "Recurse into subdirectories")
+	flagHelp         bool
+	flagWithFilename bool
+	flagInsensitive  bool
+	flagRecurse      bool
+	nonflagArgs      []string
 )
 
 func incrementAvailableThreads() {
@@ -60,10 +62,10 @@ func doPdfgrep(expr string, files []File, i int) error {
 	defer doPdfgrepExit(files, i)
 
 	args := []string{"pdfgrep"}
-	if *insensitive == true {
+	if flagInsensitive == true {
 		args = append(args, "-i")
 	}
-	if *with_filename == true {
+	if flagWithFilename == true {
 		args = append(args, "-H")
 	}
 	args = append(args, expr)
@@ -131,7 +133,7 @@ func getFileList(root string, files *[]File) error {
 
 		// Skip directories when non-recursive.
 		if s.Mode().IsDir() {
-			if !*recurse {
+			if !flagRecurse {
 				return filepath.SkipDir
 			}
 			if root == path {
@@ -152,31 +154,34 @@ func getFileList(root string, files *[]File) error {
 	return nil
 }
 
-func printUsage() {
-	fmt.Printf("usage: %s [OPTION]... PATTERN [FILE]...\n", os.Args[0])
-	fmt.Printf("Options:\n")
-	flag.PrintDefaults()
+func init() {
+	pflag.BoolVarP(&flagHelp, "help", "h", false, "Show this help menu and exit")
+	pflag.BoolVarP(&flagWithFilename, "with-filename", "H", false, "Print the file name for each match")
+	pflag.BoolVarP(&flagInsensitive, "ignore-case", "i", false, "Ignore case distinctions")
+	pflag.BoolVarP(&flagRecurse, "recursive", "r", false, "Recursively search all files")
+	pflag.Parse()
+
+	nonflagArgs = pflag.Args()
+
+	// need an expression to search for and >= 1 file argument
+	if flagHelp || (len(nonflagArgs) < 2) {
+		fmt.Printf("Usage: %s [OPTION...] PATTERN [FILE...]\n", path.Base(os.Args[0]))
+		pflag.PrintDefaults()
+		if flagHelp {
+			os.Exit(0)
+		} else {
+			os.Exit(1)
+		}
+	}
 }
 
 func main() {
 	var expr string
 
-	flag.Parse()
-	if *help {
-		printUsage()
-		os.Exit(0)
-	}
-
 	availableThreads = runtime.NumCPU()
 
-	nonflag_args := flag.Args()
-	if len(nonflag_args) < 2 {
-		printUsage()
-		os.Exit(1)
-	}
-
-	expr = nonflag_args[0]
-	filenames := nonflag_args[1:]
+	expr = nonflagArgs[0]
+	filenames := nonflagArgs[1:]
 
 	files := make([]File, 0)
 	for _, f := range filenames {
