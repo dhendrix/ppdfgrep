@@ -116,6 +116,7 @@ func getFileList(root string, files *[]File) error {
 		// Soft error. Useful when permissions are insufficient to
 		// stat one of the files.
 		if err != nil {
+			log.Println(err)
 			return nil
 		}
 
