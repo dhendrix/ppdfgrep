@@ -77,13 +77,14 @@ func doPdfgrep(expr string, files []File, i int) error {
 	files[i].buf, err = cmd.Output()
 	if err != nil {
 		if exitError, ok := err.(*exec.ExitError); ok {
-			if exitError.ExitCode() == 1 {
-				return nil // No match found, but otherwise fine
-			} else if exitError.ExitCode() == 2 {
-				// Generic error, can also occur if path is a
-				// directory or something
-				return nil
+			rc := exitError.ExitCode()
+			// According to pdfgrep man page:
+			// - If 1, no match found but otherwise fine
+			// - If 2, an error occurred
+			if rc == 2 {
+				log.Printf("Error occurred while grepping %s\n", files[i].filename)
 			}
+			return err
 		}
 	}
 
