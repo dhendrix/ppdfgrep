@@ -19,6 +19,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 )
@@ -142,6 +143,10 @@ func getFileList(root string, files *[]File) error {
 				return nil
 			}
 		} else if !isPDF(path) {
+			ext := strings.ToLower(filepath.Ext(path))
+			if ext == ".pdf" {
+				log.Printf("File does not appar to be a PDF: \"%s\"\n", path)
+			}
 			return nil
 		} else {
 			var f File
