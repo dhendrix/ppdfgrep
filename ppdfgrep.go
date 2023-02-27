@@ -188,6 +188,7 @@ func init() {
 
 func main() {
 	var expr string
+	var ret int = 0
 
 	availableThreads = runtime.NumCPU()
 
@@ -214,6 +215,10 @@ func main() {
 			f = files[i]
 		}
 
+		if f.retval != 0 {
+			ret = 1
+		}
+
 		if f.buflen == 0 {
 			continue
 		}
@@ -224,4 +229,5 @@ func main() {
 	}
 
 	wg.Wait()
+	os.Exit(ret)
 }
