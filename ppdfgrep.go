@@ -96,6 +96,7 @@ func isPDF(path string) bool {
 	file, _ := os.Open(path)
 	header := make([]byte, 261)
 	file.Read(header)
+	file.Close()
 
 	if filetype.IsArchive(header) != true {
 		return false
