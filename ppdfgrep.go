@@ -29,6 +29,7 @@ type File struct {
 	buf       []byte
 	buflen    int
 	processed bool
+	retval    int
 }
 
 var pdfgrep string = "pdfgrep" // assumes pdfgrep is in user's $PATH
@@ -84,11 +85,13 @@ func doPdfgrep(expr string, files []File, i int) error {
 			if rc == 2 {
 				log.Printf("Error occurred while grepping %s\n", files[i].filename)
 			}
+			files[i].retval = rc
 			return err
 		}
 	}
 
 	files[i].buflen = len(files[i].buf)
+	files[i].retval = 0
 	return nil
 }
 
