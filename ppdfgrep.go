@@ -73,7 +73,6 @@ func doPdfgrep(expr string, files []File, i int) error {
 	args = append(args, expr)
 	args = append(args, files[i].filename)
 
-	decrementAvailableThreads()
 	cmd := exec.Command(args[0], args[1:]...)
 	files[i].buf, err = cmd.Output()
 	if err != nil {
@@ -205,6 +204,7 @@ func main() {
 			time.Sleep(10 * time.Millisecond)
 		}
 		wg.Add(1)
+		decrementAvailableThreads()
 		go doPdfgrep(expr, files, i)
 	}
 
