@@ -201,7 +201,7 @@ func main() {
 
 	for i, _ := range files {
 		for availableThreads <= 0 {
-			time.Sleep(10 * time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
 		}
 		wg.Add(1)
 		decrementAvailableThreads()
@@ -211,7 +211,7 @@ func main() {
 	for i := 0; i < len(files); i++ {
 		f := files[i]
 		for f.processed == false {
-			time.Sleep(1 * time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
 			f = files[i]
 		}
 
