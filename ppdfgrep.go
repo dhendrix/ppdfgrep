@@ -3,7 +3,6 @@
 // pdfgrepping piles of datasheets.
 //
 // TODOs:
-// - Improve argument handling
 // - Consider using a native PDF library such as rsc.io/pdf
 
 package main
@@ -12,7 +11,6 @@ import (
 	"bufio"
 	"fmt"
 	"github.com/h2non/filetype"
-	"github.com/spf13/pflag"
 	"log"
 	"os"
 	"os/exec"
@@ -37,11 +35,8 @@ var availableThreads int
 var wg sync.WaitGroup
 
 var (
-	flagHelp         bool
-	flagWithFilename bool
-	flagInsensitive  bool
-	flagRecurse      bool
-	nonflagArgs      []string
+	flagRecurse bool
+	nonflagArgs []string
 )
 
 func incrementAvailableThreads() {
@@ -58,17 +53,14 @@ func doPdfgrepExit(files []File, i int) {
 	wg.Done()
 }
 
-func doPdfgrep(expr string, files []File, i int) error {
+func doPdfgrep(flags []string, expr string, files []File, i int) error {
 	var err error
 
 	defer doPdfgrepExit(files, i)
 
 	args := []string{"pdfgrep"}
-	if flagInsensitive == true {
-		args = append(args, "-i")
-	}
-	if flagWithFilename == true {
-		args = append(args, "-H")
+	for _, v := range flags {
+		args = append(args, v)
 	}
 	args = append(args, expr)
 	args = append(args, files[i].filename)
@@ -164,48 +156,63 @@ func getFileList(root string, files *[]File) error {
 	return nil
 }
 
-func init() {
-	pflag.BoolVarP(&flagHelp, "help", "h", false, "Show this help menu and exit")
-	pflag.BoolVarP(&flagWithFilename, "with-filename", "H", false, "Print the file name for each match")
-	pflag.BoolVarP(&flagInsensitive, "ignore-case", "i", false, "Ignore case distinctions")
-	pflag.BoolVarP(&flagRecurse, "recursive", "r", false, "Recursively search all files")
-	pflag.Parse()
+func processArgs(args []string) ([]string, []string) {
+	flags := make([]string, 0)
+	nonflags := make([]string, 0)
 
-	nonflagArgs = pflag.Args()
-
-	// need an expression to search for and >= 1 file argument
-	if flagHelp || (len(nonflagArgs) < 2) {
-		fmt.Printf("Usage: %s [OPTION...] PATTERN [FILE...]\n", path.Base(os.Args[0]))
-		pflag.PrintDefaults()
-		if flagHelp {
-			os.Exit(0)
+	for _, v := range args {
+		if strings.HasPrefix(v, "-") == false {
+			nonflags = append(nonflags, v)
+		} else if strings.HasPrefix(v, "--") {
+			// longopt
+			if strings.Compare(v, "--recursive") == 0 {
+				flagRecurse = true
+				continue
+			}
+			flags = append(flags, v)
 		} else {
-			os.Exit(1)
+			// one or more shortopts
+			if strings.Contains(v, "r") == true {
+				flagRecurse = true
+				v = strings.Replace(v, "r", "", -1)
+			}
+
+			if len(v) > 1 {
+				// v contains more than just a hypen
+				flags = append(flags, v)
+			}
 		}
 	}
-}
 
+	return flags, nonflags
+}
 func main() {
 	var expr string
 	var ret int = 0
 
 	availableThreads = runtime.NumCPU()
 
-	expr = nonflagArgs[0]
-	filenames := nonflagArgs[1:]
+	flags, nonflags := processArgs(os.Args[1:])
 
+	if len(nonflags) < 2 {
+		fmt.Printf("Usage: %s [OPTION...] PATTERN [FILE...]\n", path.Base(os.Args[0]))
+		os.Exit(1)
+	}
+
+	expr = nonflags[0]
+	filenames := nonflags[1:]
 	files := make([]File, 0)
 	for _, f := range filenames {
 		getFileList(f, &files)
 	}
 
-	for i, _ := range files {
+	for i := range files {
 		for availableThreads <= 0 {
 			time.Sleep(100 * time.Millisecond)
 		}
 		wg.Add(1)
 		decrementAvailableThreads()
-		go doPdfgrep(expr, files, i)
+		go doPdfgrep(flags, expr, files, i)
 	}
 
 	for i := 0; i < len(files); i++ {
