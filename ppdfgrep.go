@@ -14,7 +14,6 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"github.com/h2non/filetype"
 	"log"
 	"os"
 	"os/exec"
@@ -24,6 +23,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/h2non/filetype"
 )
 
 type File struct {
@@ -193,6 +194,11 @@ func processArgs(args []string) ([]string, []string) {
 func main() {
 	var expr string
 	var ret int = 0
+
+	if _, err := exec.LookPath("pdfgrep"); err != nil {
+		fmt.Println("Error: pdfgrep must be installed in to use this tool")
+		os.Exit(1)
+	}
 
 	availableThreads = runtime.NumCPU()
 
