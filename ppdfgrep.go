@@ -6,245 +6,246 @@
 // every PDF file specified or found in a directory hierarchy. Useful for
 // pdfgrepping piles of datasheets.
 //
-// TODOs:
-// - Consider using a native PDF library such as rsc.io/pdf
+// Like pdfgrep itself, it exits 0 when a match is found and 1 when no
+// match was found (or pdfgrep failed on a file). Tool errors - bad
+// usage, a missing pdfgrep, or unreadable input - exit 2.
+//
+// TODO: consider using a native PDF library such as rsc.io/pdf
 
 package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/h2non/filetype"
 )
 
-type File struct {
-	filename  string
-	buf       []byte
-	buflen    int
-	processed bool
-	retval    int
-}
+// pdfgrepPath is the external binary that does the actual matching; it is
+// expected to be on the user's $PATH.
+const pdfgrepPath = "pdfgrep"
 
-var pdfgrep string = "pdfgrep" // assumes pdfgrep is in user's $PATH
-var availableThreads int
-var wg sync.WaitGroup
-
-var (
-	flagRecurse bool
-	nonflagArgs []string
+// Exit codes, following pdfgrep's own convention (see `man pdfgrep`).
+const (
+	exitOK    = 0 // a match was found
+	exitNoHit = 1 // no match found, or pdfgrep failed on a file
+	exitError = 2 // tool error: bad usage, missing pdfgrep, unreadable input
 )
 
-func incrementAvailableThreads() {
-	availableThreads++
+// fileResult holds the outcome of grepping a single file.
+type fileResult struct {
+	output   []byte
+	exitCode int
 }
 
-func decrementAvailableThreads() {
-	availableThreads--
-}
+// splitArgs separates ppdfgrep's own options (currently only
+// -r / --recursive) from the options forwarded to pdfgrep and the
+// positional arguments (PATTERN and FILE...). Arguments are parsed by
+// hand because the forwarded options belong to pdfgrep and should not be
+// validated here.
+func splitArgs(args []string) (recurse bool, flags, positional []string) {
+	flags = []string{}
+	positional = []string{}
 
-func doPdfgrepExit(files []File, i int) {
-	files[i].processed = true
-	incrementAvailableThreads()
-	wg.Done()
-}
-
-func doPdfgrep(flags []string, expr string, files []File, i int) error {
-	var err error
-
-	defer doPdfgrepExit(files, i)
-
-	args := []string{"pdfgrep"}
-	for _, v := range flags {
-		args = append(args, v)
-	}
-	args = append(args, expr)
-	args = append(args, files[i].filename)
-
-	cmd := exec.Command(args[0], args[1:]...)
-	files[i].buf, err = cmd.Output()
-	if err != nil {
-		if exitError, ok := err.(*exec.ExitError); ok {
-			rc := exitError.ExitCode()
-			// According to pdfgrep man page:
-			// - If 1, no match found but otherwise fine
-			// - If 2, an error occurred
-			if rc == 2 {
-				log.Printf("Error occurred while grepping %s\n", files[i].filename)
+	for _, arg := range args {
+		switch {
+		case !strings.HasPrefix(arg, "-"):
+			positional = append(positional, arg)
+		case arg == "--recursive":
+			recurse = true
+		case !strings.HasPrefix(arg, "--") && strings.Contains(arg, "r"):
+			// Short options may be combined, e.g. "-lr"; pull out "r".
+			recurse = true
+			arg = strings.ReplaceAll(arg, "r", "")
+			if len(arg) > 1 {
+				flags = append(flags, arg)
 			}
-			files[i].retval = rc
-			return err
+		default:
+			if len(arg) > 1 {
+				flags = append(flags, arg)
+			}
 		}
 	}
-
-	files[i].buflen = len(files[i].buf)
-	files[i].retval = 0
-	return nil
+	return
 }
 
+// isPDF reports whether the file at path looks like a PDF by sniffing
+// its magic bytes.
 func isPDF(path string) bool {
-	// Following examples from
-	// https://github.com/h2non/filetype#supported-types
-	file, _ := os.Open(path)
+	f, err := os.Open(path)
+	if err != nil {
+		log.Printf("checking %s: %v", path, err)
+		return false
+	}
+	defer f.Close()
+
+	// Only the first bytes are needed to identify the file type, so a
+	// short read is fine.
 	header := make([]byte, 261)
-	file.Read(header)
-	file.Close()
-
-	if filetype.IsArchive(header) != true {
+	n, err := f.Read(header)
+	if n == 0 {
+		if err != nil && err != io.EOF {
+			log.Printf("reading %s: %v", path, err)
+		}
 		return false
 	}
-
-	kind, _ := filetype.Match(header)
-	if kind == filetype.Unknown {
-		return false
-	}
-
-	return filetype.IsMIME(header, "application/pdf")
-
+	return filetype.IsMIME(header[:n], "application/pdf")
 }
 
-func getFileList(root string, files *[]File) error {
-	return filepath.Walk(root, func(path string, osfi os.FileInfo, err error) error {
-		// Soft error. Useful when permissions are insufficient to
-		// stat one of the files.
-		if err != nil {
-			log.Println(err)
-			return nil
-		}
+// collectPDFs returns the PDF files found under each root. Directory
+// roots are walked recursively only when recurse is set. Errors on
+// individual entries (e.g. an unreadable subdirectory) are logged and
+// ignored; a root that cannot even be stat'd is returned as an error.
+func collectPDFs(recurse bool, roots []string) ([]string, error) {
+	var files []string
+	var walkErr error
 
-		file := filepath.Base(path)
-
-		// Skip ".", "..", and hidden files (beginning in '.')
-		if file[0] == '.' || file == ".." {
-			return nil
-		}
-
-		s, err := os.Lstat(path)
-		if err != nil {
-			log.Printf("Failed to lstat \"%s\"\n", path)
-			return err
-		}
-
-		// Skip directories when non-recursive.
-		if s.Mode().IsDir() {
-			if !flagRecurse {
-				return filepath.SkipDir
-			}
-			if root == path {
+	for _, root := range roots {
+		err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				if info == nil {
+					// The root itself could not be stat'd; fail the walk.
+					return err
+				}
+				// Soft error on a sub-entry; log and keep going.
+				log.Printf("%s: %v", path, err)
 				return nil
 			}
-		} else if !isPDF(path) {
-			ext := strings.ToLower(filepath.Ext(path))
-			if ext == ".pdf" {
-				log.Printf("File does not appar to be a PDF: \"%s\"\n", path)
+
+			// Skip hidden files, but still descend into hidden
+			// directories (e.g. when the root itself is one).
+			if !info.IsDir() && strings.HasPrefix(info.Name(), ".") {
+				return nil
+			}
+
+			if info.IsDir() {
+				if path != root && !recurse {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+
+			if isPDF(path) {
+				files = append(files, path)
+			} else if strings.EqualFold(filepath.Ext(path), ".pdf") {
+				log.Printf("file does not appear to be a PDF: %q", path)
 			}
 			return nil
-		} else {
-			var f File
-			f.filename = path
-			f.buflen = 0
-			f.processed = false
-			*files = append(*files, f)
+		})
+		if err != nil && walkErr == nil {
+			walkErr = fmt.Errorf("walking %q: %w", root, err)
 		}
+	}
 
-		return nil
-	})
-	return nil
+	return files, walkErr
 }
 
-func processArgs(args []string) ([]string, []string) {
-	flags := make([]string, 0)
-	nonflags := make([]string, 0)
+// grepFile runs pdfgrep on a single file and returns its output and exit
+// code. pdfgrep exits 0 on a match, 1 when no match was found, and 2 on
+// error.
+func grepFile(flags []string, pattern, path string) fileResult {
+	args := append([]string{pdfgrepPath}, flags...)
+	args = append(args, pattern, path)
 
-	for _, v := range args {
-		if strings.HasPrefix(v, "-") == false {
-			nonflags = append(nonflags, v)
-		} else if strings.HasPrefix(v, "--") {
-			// longopt
-			if strings.Compare(v, "--recursive") == 0 {
-				flagRecurse = true
-				continue
+	out, err := exec.Command(args[0], args[1:]...).Output()
+	if err != nil {
+		exitErr, ok := err.(*exec.ExitError)
+		if ok {
+			// Exit code 1 ("no matches") is a normal outcome; only 2
+			// is worth logging.
+			if exitErr.ExitCode() == 2 {
+				if msg := strings.TrimSpace(string(exitErr.Stderr)); msg != "" {
+					log.Printf("pdfgrep failed on %s: %s", path, msg)
+				} else {
+					log.Printf("pdfgrep failed on %s: %v", path, exitErr)
+				}
 			}
-			flags = append(flags, v)
-		} else {
-			// one or more shortopts
-			if strings.Contains(v, "r") == true {
-				flagRecurse = true
-				v = strings.Replace(v, "r", "", -1)
-			}
-
-			if len(v) > 1 {
-				// v contains more than just a hypen
-				flags = append(flags, v)
-			}
+			return fileResult{exitCode: exitErr.ExitCode()}
 		}
+		log.Printf("running %s: %v", pdfgrepPath, err)
+		return fileResult{exitCode: 1}
 	}
 
-	return flags, nonflags
+	return fileResult{output: out}
 }
-func main() {
-	var expr string
-	var ret int = 0
 
-	if _, err := exec.LookPath("pdfgrep"); err != nil {
-		fmt.Println("Error: pdfgrep must be installed in to use this tool")
-		os.Exit(1)
-	}
+// grepFiles greps every path with at most parallelism pdfgrep processes
+// running concurrently. Results are returned in the same order as paths.
+func grepFiles(flags []string, pattern string, paths []string, parallelism int) []fileResult {
+	results := make([]fileResult, len(paths))
 
-	availableThreads = runtime.NumCPU()
+	sem := make(chan struct{}, parallelism)
+	var wg sync.WaitGroup
 
-	flags, nonflags := processArgs(os.Args[1:])
-
-	if len(nonflags) < 2 {
-		fmt.Printf("Usage: %s [OPTION...] PATTERN [FILE...]\n", path.Base(os.Args[0]))
-		os.Exit(1)
-	}
-
-	expr = nonflags[0]
-	filenames := nonflags[1:]
-	files := make([]File, 0)
-	for _, f := range filenames {
-		getFileList(f, &files)
-	}
-
-	for i := range files {
-		for availableThreads <= 0 {
-			time.Sleep(100 * time.Millisecond)
-		}
+	for i, p := range paths {
 		wg.Add(1)
-		decrementAvailableThreads()
-		go doPdfgrep(flags, expr, files, i)
-	}
+		go func(i int, p string) {
+			defer wg.Done()
 
-	for i := 0; i < len(files); i++ {
-		f := files[i]
-		for f.processed == false {
-			time.Sleep(100 * time.Millisecond)
-			f = files[i]
-		}
+			sem <- struct{}{} // block until a worker slot is free
+			defer func() { <-sem }()
 
-		if f.retval != 0 {
-			ret = 1
-		}
-
-		if f.buflen == 0 {
-			continue
-		}
-
-		w := bufio.NewWriter(os.Stdout)
-		w.Write(f.buf)
-		w.Flush()
+			results[i] = grepFile(flags, pattern, p)
+		}(i, p)
 	}
 
 	wg.Wait()
-	os.Exit(ret)
+	return results
+}
+
+func main() {
+	code, err := run()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(exitError)
+	}
+	os.Exit(code)
+}
+
+// run executes ppdfgrep and returns its exit code. A non-nil error
+// signals a tool error, which main reports and exits with exitError.
+func run() (int, error) {
+	if _, err := exec.LookPath(pdfgrepPath); err != nil {
+		return 0, errors.New("pdfgrep must be installed to use this tool")
+	}
+
+	recurse, flags, positional := splitArgs(os.Args[1:])
+	if len(positional) < 2 {
+		return 0, fmt.Errorf("Usage: %s [OPTION...] PATTERN [FILE...]", filepath.Base(os.Args[0]))
+	}
+
+	pattern := positional[0]
+	files, err := collectPDFs(recurse, positional[1:])
+	if err != nil {
+		return 0, err
+	}
+
+	results := grepFiles(flags, pattern, files, runtime.NumCPU())
+
+	w := bufio.NewWriter(os.Stdout)
+	code := exitOK
+	for _, r := range results {
+		if r.exitCode != 0 {
+			code = exitNoHit
+		}
+		if r.exitCode == 0 && len(r.output) > 0 {
+			if _, err := w.Write(r.output); err != nil {
+				return 0, err
+			}
+		}
+	}
+	if err := w.Flush(); err != nil {
+		return 0, err
+	}
+
+	return code, nil
 }
