@@ -1,4 +1,8 @@
-// This is a wrapper for `pdfgrep` that will run parallel instances for
+// SPDX-FileCopyrightText: 2026 David Hendricks <david.hendricks@gmail.com>
+//
+// SPDX-License-Identifier: BSD-3-Clause
+//
+// This is a wrapper for `pdfgrep` that will run concurrent instances for
 // every PDF file specified or found in a directory hierarchy. Useful for
 // pdfgrepping piles of datasheets.
 //
