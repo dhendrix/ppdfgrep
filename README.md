@@ -11,13 +11,13 @@ matches from different PDFs do not appear interleaved on the screen.
 ## Installation
 
 ```console
-$ go install github.com/dhendrix/ppdfgrep@latest
+go install github.com/dhendrix/ppdfgrep@latest
 ```
 
 or, from a checkout of this repository:
 
 ```console
-$ go build
+go build
 ```
 
 ## Requirements
